@@ -224,7 +224,9 @@ static int libapduinterface_init(struct euicc_apdu_interface *ifstruct) {
     ifstruct->logic_channel_close = qmi_apdu_interface_logic_channel_close;
     ifstruct->transmit = qmi_apdu_interface_transmit;
 
-    qmi_utils_set_traces_enabled(TRUE); /* emit debug logs via env-var G_MESSAGES_DEBUG=all */
+    if (getenv("LPAC_APDU_QMI_DEBUG")) {
+        qmi_utils_set_traces_enabled(TRUE); /* emit debug logs via env-var G_MESSAGES_DEBUG=all */
+    }
 
     /*
      * Allow the user to select the SIM card slot via environment variable.
