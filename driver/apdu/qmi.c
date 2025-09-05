@@ -181,9 +181,9 @@ static int apdu_interface_connect(struct euicc_ctx *ctx) {
         return -1;
     }
 
-    qmi_device_open_sync(device, QMI_DEVICE_OPEN_FLAGS_PROXY, qmi_priv->context, &error);
+    qmi_device_open_sync(device, QMI_DEVICE_OPEN_FLAGS_AUTO /* QMI_DEVICE_OPEN_FLAGS_PROXY */, qmi_priv->context, &error);
     if (error) {
-        fprintf(stderr, "error: open QMI device failed: %s\n", error->message);
+        fprintf(stderr, "%s [%d] error: open QMI device failed: %s\n", __FUNCTION__, __LINE__, error->message);
         return -1;
     }
 
@@ -223,6 +223,8 @@ static int libapduinterface_init(struct euicc_apdu_interface *ifstruct) {
     ifstruct->logic_channel_open = qmi_apdu_interface_logic_channel_open;
     ifstruct->logic_channel_close = qmi_apdu_interface_logic_channel_close;
     ifstruct->transmit = qmi_apdu_interface_transmit;
+
+    qmi_utils_set_traces_enabled(TRUE); /* emit debug logs via env-var G_MESSAGES_DEBUG=all */
 
     /*
      * Allow the user to select the SIM card slot via environment variable.
