@@ -18,11 +18,16 @@
 
 // Replace AT+CCHO, AT+CCHC, AT+CGLA  with AT+CSIM
 #define USE_AT_CSIM         1   /* 1=AT+CSIM, 0:AT+CCHO */
+#define SEND_ECHO_OFF       1   /* 1=send ATE0, 0:don't send ATE0 */
 
 #if USE_RAW_IO
 #include <fcntl.h>      /* File control definitions */
 #include <errno.h>      /* Error number definitions */
 #include <termios.h>    /* POSIX terminal control definitions */
+#endif
+
+#if USE_AT_CSIM
+#define EXPECTED_CSIM_RSP_START     "+CSIM: "
 #endif
 
 #define DEBUG_LOG_ENABLED   1   /* 1=enable,  0=disable */
@@ -83,18 +88,45 @@ static int logic_channel = 0;
 static char *buffer;
 
 #if USE_RAW_IO
+#define RECEIVE_MAX_TRIES           10
+#define OK_PATTERN_MIN_LEN          4
+#define OK_PATTERN                  "OK"
+
 static size_t PosixModem_ReadResponse(int fd,
                                       char *responseBuf_p,
                                       size_t maxResponseBufSize)
 {
-    size_t bytesRead;
+    size_t totalBytesRead = 0;
+    size_t bytesRead = 0;
+    size_t tries = RECEIVE_MAX_TRIES;
 
-    bytesRead = read(fd,
-                     (uint8_t *)responseBuf_p,
-                     maxResponseBufSize);
+    while (tries) {
+        bytesRead = read(fd,
+                         (uint8_t *)&responseBuf_p[totalBytesRead],
+                         maxResponseBufSize);
 
-    return bytesRead;
+        if (bytesRead > 0) {
+            totalBytesRead += bytesRead;
+
+            // stop reading when OK is received
+            if ((totalBytesRead > OK_PATTERN_MIN_LEN) &&
+                (strstr(&responseBuf_p[totalBytesRead - OK_PATTERN_MIN_LEN], OK_PATTERN) != NULL)) {
+
+                //DEBUG_PRINT(("AT_DEBUG: %s[%d] OK in %s\n", __FUNCTION__, __LINE__, responseBuf_p));
+                break;
+            }
+        }
+        else {
+            // stop reading when no byte is read
+            break;
+        }
+        tries--;
+    }
+    return totalBytesRead;
 }
+#undef RECEIVE_MAX_TRIES
+#undef OK_PATTERN_MIN_LEN
+#undef OK_PATTERN
 
 static bool PosixModem_WriteCommand(int fd,
                                     const char* commandStr_p)
@@ -124,7 +156,7 @@ static void FlushAll(int fd)
 #define MAX_FLUSH_TRIES     50
 #define MAX_FLUSH_BUF_SIZE  20
 
-    char recvBuf[MAX_FLUSH_BUF_SIZE];
+    static char recvBuf[MAX_FLUSH_BUF_SIZE];
     size_t tries = MAX_FLUSH_TRIES;
 
     while (tries > 0) {
@@ -179,19 +211,18 @@ static int at_expect(char **response, const char *expected) {
     if (response)
         *response = NULL;
 
-    while (1) {
 #if USE_RAW_IO
-        size_t numBytesRead;
+    while (1) {
+        size_t numBytesRead = 0;
         numBytesRead = PosixModem_ReadResponse( s_fd,
                                                 buffer,
                                                 AT_BUFFER_SIZE);
-
         if (numBytesRead > 0) {
             buffer[numBytesRead] = '\0';
         }
 
         char* start_p = buffer;
-        size_t lenRead;
+        size_t lenRead = 0;
 
         while (*start_p) {
             // analyze buffer for multiple '\r\n' seqments
@@ -213,10 +244,12 @@ static int at_expect(char **response, const char *expected) {
 
             if (strstr(start_p, "ERROR") != NULL)
             {
+                DEBUG_PRINT(("AT_DEBUG: %s[%d] ERROR, return -1\n", __FUNCTION__, __LINE__));
                 return -1;
             }
             else if (strcmp(start_p, "OK") == 0)
             {
+                DEBUG_PRINT(("AT_DEBUG: %s[%d] OK, return 0\n", __FUNCTION__, __LINE__));
                 return 0;
             }
             else if (expected && strncmp(start_p, expected, strlen(expected)) == 0)
@@ -232,8 +265,10 @@ static int at_expect(char **response, const char *expected) {
                 break;
             }
         }
+    }
 
 #else
+    while (1) {
         fgets(buffer, AT_BUFFER_SIZE, fuart);
         buffer[strcspn(buffer, "\r\n")] = 0;
         if (getenv_or_default(ENV_AT_DEBUG, (bool)false))
@@ -246,8 +281,9 @@ static int at_expect(char **response, const char *expected) {
             if (response)
                 *response = strdup(buffer + strlen(expected));
         }
-#endif
     }
+#endif
+
     return 0;
 }
 
@@ -314,6 +350,22 @@ static int apdu_interface_connect(struct euicc_ctx *ctx) {
 #endif
 
 #if USE_AT_CSIM
+
+#if SEND_ECHO_OFF
+// send 'echo off' command to reduce the amount of response data that needs to be read
+#if USE_RAW_IO
+    PosixModem_WriteCommand(s_fd, "ATE0\r\n");
+#else
+    fprintf(fuart, "ATE0\r\n");
+#endif
+
+    if (at_expect(NULL, NULL))
+    {
+        fprintf(stderr, "Device missing ATE0 support\n");
+        return -1;
+    }
+#endif
+
 #if USE_RAW_IO
     PosixModem_WriteCommand(s_fd, "AT+CSIM=?\r\n");
 #else
@@ -383,7 +435,7 @@ static int apdu_interface_transmit_atcsim(struct euicc_ctx *ctx,
     uint8_t **rx, uint32_t *rx_len, const uint8_t *tx, uint32_t tx_len)
 {
 #if USE_RAW_IO
-    char strBuffer[AT_CSIM_CMD_PADDED_LEN];
+    static char strBuffer[AT_CSIM_CMD_PADDED_LEN];
 #endif
 
     int fret = 0;
@@ -430,7 +482,7 @@ static int apdu_interface_transmit_atcsim(struct euicc_ctx *ctx,
     fprintf(fuart, "\"\r\n");
 #endif
 
-    if (at_expect(&response, "+CSIM: "))
+    if (at_expect(&response, EXPECTED_CSIM_RSP_START))
     {
         goto err;
     }
@@ -571,7 +623,7 @@ static int apdu_interface_logic_channel_open_atcsim(struct euicc_ctx *ctx,
     const uint8_t *aid, uint8_t aid_len)
 {
 #if USE_RAW_IO
-    char strBuffer[AT_CSIM_CMD_PADDED_LEN];
+    static char strBuffer[AT_CSIM_CMD_PADDED_LEN];
 #endif
 
     char *response;
@@ -587,7 +639,7 @@ static int apdu_interface_logic_channel_open_atcsim(struct euicc_ctx *ctx,
     int fret;
     uint8_t *rx_p = NULL;
     uint32_t rx_len = 0;
-    uint8_t manageChannelOpen[] = {0x00, 0x70, 0x00, 0x00, 0x01};
+    const uint8_t manageChannelOpen[] = {0x00, 0x70, 0x00, 0x00, 0x01};
 
     fret = apdu_interface_transmit_atcsim(ctx, &rx_p, &rx_len,
         manageChannelOpen, sizeof(manageChannelOpen));
@@ -607,9 +659,10 @@ static int apdu_interface_logic_channel_open_atcsim(struct euicc_ctx *ctx,
     rx_p = NULL;
     rx_len = 0;
 
-    uint8_t selectIsdr[] = {logic_channel, 0xA4, 0x04, 0x00, 0x10, 0xA0, 0x00, 0x00,
+    static uint8_t selectIsdr[] = {0x00 /*logic_channel*/, 0xA4, 0x04, 0x00, 0x10, 0xA0, 0x00, 0x00,
                 0x05, 0x59, 0x10, 0x10, 0xFF, 0xFF, 0xFF, 0xFF,
                 0x89, 0x00, 0x00, 0x01, 0x00};
+    selectIsdr[0] = logic_channel; // got to do this if selectIsdr is static
 
     fret = apdu_interface_transmit_atcsim(ctx, &rx_p, &rx_len,
         selectIsdr, sizeof(selectIsdr));
